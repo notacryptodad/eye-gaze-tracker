@@ -120,6 +120,31 @@
             width: 90%; max-width: 400px; margin: 8px auto;
             display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px;
         }
+        .distance-bar {
+            width: 90%; max-width: 400px; margin: 4px auto;
+            background: rgba(255,255,255,0.05); border-radius: 8px;
+            padding: 8px 12px; text-align: center;
+        }
+        .distance-bar .dist-visual {
+            height: 8px; border-radius: 4px; margin-top: 6px;
+            background: linear-gradient(90deg, #00b894, #fdcb6e, #e17055);
+            position: relative;
+        }
+        .distance-bar .dist-marker {
+            position: absolute; top: -4px;
+            width: 16px; height: 16px; border-radius: 50%;
+            background: #fff; border: 2px solid #6c5ce7;
+            transform: translateX(-50%);
+            transition: left 0.2s ease;
+        }
+        .distance-bar .dist-labels {
+            display: flex; justify-content: space-between;
+            font-size: 0.55rem; color: #888; margin-top: 4px;
+        }
+        .dist-warning {
+            font-size: 0.75rem; color: #fdcb6e; margin-top: 4px;
+            min-height: 1em;
+        }
         .metric-card {
             background: rgba(255,255,255,0.05);
             border: 1px solid rgba(255,255,255,0.1);
@@ -179,6 +204,16 @@
         <div class="metric-card"><div class="label">X</div><div class="value" id="gazeH">--</div></div>
         <div class="metric-card"><div class="label">Y</div><div class="value" id="gazeV">--</div></div>
         <div class="metric-card"><div class="label">FPS</div><div class="value" id="fps">--</div></div>
+        <div class="metric-card"><div class="label">Distance</div><div class="value" id="distance">--</div></div>
+        <div class="metric-card"><div class="label">Eye Gap</div><div class="value" id="eyeGap">--</div></div>
+        <div class="metric-card"><div class="label">Face %</div><div class="value" id="faceRatio">--</div></div>
+    </div>
+
+    <div class="distance-bar">
+        <span style="font-size:0.7rem;color:#aaa;">📏 Phone Distance</span>
+        <div class="dist-visual"><div class="dist-marker" id="distMarker" style="left:50%"></div></div>
+        <div class="dist-labels"><span>Too Close</span><span>Ideal</span><span>Too Far</span></div>
+        <div class="dist-warning" id="distWarning"></div>
     </div>
 
     <div class="controls">
@@ -228,6 +263,18 @@
         let gazeHistory = [];
         let isRunning = false;
         let currentGaze = { h: 0.5, v: 0.5 };
+
+        // ====== DISTANCE ESTIMATION ======
+        // Average inter-pupillary distance (IPD) for adults: ~63mm
+        // We use the ratio of eye distance in frame vs known IPD to estimate distance
+        // Focal length is calibrated per-device; we use a reasonable default
+        const AVG_IPD_MM = 63; // average adult inter-pupillary distance in mm
+        const AVG_FACE_WIDTH_MM = 140; // average face width (cheek to cheek) in mm
+        let focalLengthPx = 0; // calibrated from first detection or manual
+        let distanceCalibrated = false;
+        const KNOWN_DISTANCE_CM = 40; // assume ~40cm at startup for auto-calibration
+        let distanceHistory = [];
+        const DIST_SMOOTH = 10;
 
         // ====== CALIBRATION ======
         // Maps raw gaze (0-1 iris ratio) → screen coordinates
@@ -377,6 +424,83 @@
             return { yaw: (nose.x - lCheek.x) / fW, pitch: (nose.y - forehead.y) / fH };
         }
 
+        function computeDistance(landmarks, frameWidth) {
+            // Method 1: Inter-pupillary distance (most reliable)
+            const leftIris = landmarks[LEFT_IRIS_CENTER];
+            const rightIris = landmarks[RIGHT_IRIS_CENTER];
+            const eyeDistPx = Math.sqrt(
+                Math.pow((rightIris.x - leftIris.x) * frameWidth, 2) +
+                Math.pow((rightIris.y - leftIris.y) * frameWidth, 2)
+            );
+
+            // Method 2: Face width (cheek to cheek)
+            const lCheek = landmarks[LEFT_CHEEK];
+            const rCheek = landmarks[RIGHT_CHEEK];
+            const faceWidthPx = Math.sqrt(
+                Math.pow((rCheek.x - lCheek.x) * frameWidth, 2) +
+                Math.pow((rCheek.y - lCheek.y) * frameWidth, 2)
+            );
+
+            // Auto-calibrate focal length on first good detection
+            if (!distanceCalibrated && eyeDistPx > 20) {
+                // Assume user is ~40cm away at start
+                focalLengthPx = (eyeDistPx * KNOWN_DISTANCE_CM) / AVG_IPD_MM * 10;
+                distanceCalibrated = true;
+                log('Distance auto-calibrated (assuming 40cm start)');
+            }
+
+            if (!distanceCalibrated) return null;
+
+            // Distance = (real_size * focal_length) / pixel_size
+            const distFromEyes = (AVG_IPD_MM * focalLengthPx) / (eyeDistPx * 10);
+            const distFromFace = (AVG_FACE_WIDTH_MM * focalLengthPx) / (faceWidthPx * 10);
+
+            // Weighted average (eyes more reliable)
+            const distCm = distFromEyes * 0.7 + distFromFace * 0.3;
+
+            // Smooth
+            distanceHistory.push(distCm);
+            if (distanceHistory.length > DIST_SMOOTH) distanceHistory.shift();
+            const smoothed = distanceHistory.reduce((a, b) => a + b, 0) / distanceHistory.length;
+
+            // Face ratio (how much of frame is face)
+            const faceRatio = faceWidthPx / frameWidth * 100;
+
+            return {
+                distanceCm: Math.round(smoothed),
+                eyeGapPx: Math.round(eyeDistPx),
+                faceRatio: faceRatio.toFixed(1)
+            };
+        }
+
+        function updateDistanceUI(distData) {
+            if (!distData) return;
+
+            document.getElementById('distance').textContent = distData.distanceCm + 'cm';
+            document.getElementById('eyeGap').textContent = distData.eyeGapPx + 'px';
+            document.getElementById('faceRatio').textContent = distData.faceRatio + '%';
+
+            // Position marker on distance bar (15cm to 80cm range)
+            const minDist = 15, maxDist = 80;
+            const pct = Math.max(0, Math.min(100, (distData.distanceCm - minDist) / (maxDist - minDist) * 100));
+            document.getElementById('distMarker').style.left = pct + '%';
+
+            // Warning messages
+            const warn = document.getElementById('distWarning');
+            if (distData.distanceCm < 25) {
+                warn.textContent = '⚠️ Too close! Move phone further away';
+                warn.style.color = '#e17055';
+            } else if (distData.distanceCm > 60) {
+                warn.textContent = '⚠️ Too far! Move phone closer';
+                warn.style.color = '#e17055';
+            } else if (distData.distanceCm >= 30 && distData.distanceCm <= 50) {
+                warn.textContent = '✅ Ideal distance';
+                warn.style.color = '#00b894';
+            } else {
+                warn.textContent = '';
+            }
+        }
+
         function smooth(gaze) {
             gazeHistory.push(gaze);
             if (gazeHistory.length > SMOOTH_FRAMES) gazeHistory.shift();
@@ -457,6 +581,7 @@
             if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
                 updateUI('no-face', null);
                 gazeHistory = [];
+                distanceHistory = [];
                 return;
             }
             const lm = results.multiFaceLandmarks[0];
@@ -466,6 +591,10 @@
             const status = getStatus(gaze, head);
             drawEyes(lm, overlay.width, overlay.height);
             updateUI(status, gaze);
+
+            // Distance estimation
+            const distData = computeDistance(lm, overlay.width);
+            updateDistanceUI(distData);
         }
 
         // ====== START ======
