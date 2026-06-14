@@ -170,6 +170,10 @@
         }
         .btn:active { transform: scale(0.95); }
         .btn:disabled { opacity: 0.5; pointer-events: none; }
+        .btn-quick {
+            background: linear-gradient(135deg, #fdcb6e, #f39c12);
+            box-shadow: 0 4px 15px rgba(243, 156, 18, 0.4);
+        }
         .log {
             width: 90%; max-width: 400px; margin: 6px auto;
             font-size: 0.7rem; color: #aaa; text-align: left;
@@ -219,6 +223,7 @@
     <div class="controls">
         <button class="btn btn-primary" id="startBtn">Start Camera</button>
         <button class="btn btn-cal" id="calBtn" disabled>Calibrate</button>
+        <button class="btn btn-quick" id="quickCalBtn" disabled>Quick 5pt</button>
     </div>
 
     <div class="log" id="log"></div>
@@ -234,6 +239,7 @@
         const statusBanner = document.getElementById('statusBanner');
         const startBtn = document.getElementById('startBtn');
         const calBtn = document.getElementById('calBtn');
+        const quickCalBtn = document.getElementById('quickCalBtn');
         const logEl = document.getElementById('log');
         const gazeDot = document.getElementById('gazeDot');
         const calibrationOverlay = document.getElementById('calibrationOverlay');
@@ -300,8 +306,8 @@
             samples: []
         };
 
-        // 9-point calibration grid (3x3)
-        const CAL_POINTS = [
+        // 9-point full calibration grid (3x3)
+        const CAL_POINTS_FULL = [
             { x: 0.5,  y: 0.5 },   // 1. center (first for comfort)
             { x: 0.1,  y: 0.1 },   // 2. top-left
             { x: 0.5,  y: 0.1 },   // 3. top-center
@@ -312,12 +318,24 @@
             { x: 0.5,  y: 0.9 },   // 8. bottom-center
             { x: 0.9,  y: 0.9 },   // 9. bottom-right
         ];
+
+        // 5-point quick calibration (center + 4 corners)
+        const CAL_POINTS_QUICK = [
+            { x: 0.5,  y: 0.5 },
+            { x: 0.1,  y: 0.1 },
+            { x: 0.9,  y: 0.1 },
+            { x: 0.1,  y: 0.9 },
+            { x: 0.9,  y: 0.9 },
+        ];
+
+        let activeCalPoints = CAL_POINTS_FULL;
         let calIndex = 0;
         let calSamples = [];
         let calCollecting = false;
         let calCollectTimer = null;
 
-        function startCalibration() {
+        function startCalibration(quick) {
+            activeCalPoints = quick ? CAL_POINTS_QUICK : CAL_POINTS_FULL;
             calibration.points = [];
             calibration.samples = [];
             calibration.polyX = null;
@@ -325,14 +343,14 @@
             calIndex = 0;
             calibrationOverlay.classList.add('active');
             showCalPoint();
-            log('9-point calibration started — look at each dot and tap');
+            log((quick ? '5-point quick' : '9-point full') + ' calibration started');
         }
 
         function showCalPoint() {
-            const pt = CAL_POINTS[calIndex];
+            const pt = activeCalPoints[calIndex];
             calTarget.style.left = (pt.x * 100) + '%';
             calTarget.style.top = (pt.y * 100) + '%';
-            calProgress.textContent = `Point ${calIndex + 1} / ${CAL_POINTS.length}`;
+            calProgress.textContent = `Point ${calIndex + 1} / ${activeCalPoints.length}`;
             calInstruction.textContent = 'Look at the red dot, then tap anywhere';
             calSamples = [];
             calCollecting = false;
@@ -356,13 +374,13 @@
                 const avgH = calSamples.reduce((s, g) => s + g.h, 0) / calSamples.length;
                 const avgV = calSamples.reduce((s, g) => s + g.v, 0) / calSamples.length;
 
-                calibration.points.push(CAL_POINTS[calIndex]);
+                calibration.points.push(activeCalPoints[calIndex]);
                 calibration.samples.push({ h: avgH, v: avgV });
 
-                log(`Cal point ${calIndex + 1}: screen(${CAL_POINTS[calIndex].x}, ${CAL_POINTS[calIndex].y}) → gaze(${avgH.toFixed(3)}, ${avgV.toFixed(3)})`);
+                log(`Cal point ${calIndex + 1}: screen(${activeCalPoints[calIndex].x}, ${activeCalPoints[calIndex].y}) → gaze(${avgH.toFixed(3)}, ${avgV.toFixed(3)})`);
 
                 calIndex++;
-                if (calIndex >= CAL_POINTS.length) {
+                if (calIndex >= activeCalPoints.length) {
                     finishCalibration();
                 } else {
                     showCalPoint();
@@ -511,7 +529,7 @@
             return { x: sx, y: sy };
         }
 
-        // ====== GAZE COMPUTATION ======
+        // ====== GAZE COMPUTATION (with head pose compensation) ======
         function computeGaze(landmarks) {
             const lOuter = landmarks[LEFT_EYE_OUTER];
             const lInner = landmarks[LEFT_EYE_INNER];
@@ -529,7 +547,25 @@
             const rHR = (rIris.x - rOuter.x) / rW;
             const rVR = (rIris.y - landmarks[RIGHT_EYE_TOP].y) / rH;
 
-            return { h: (lHR + rHR) / 2, v: (lVR + rVR) / 2 };
+            let h = (lHR + rHR) / 2;
+            let v = (lVR + rVR) / 2;
+
+            // Head pose compensation:
+            // When head rotates, iris ratio shifts even if gaze target is same.
+            // Compensate by subtracting the head-induced shift.
+            const head = computeHeadPose(landmarks);
+            const headYawOffset = head.yaw - 0.5;    // >0 = head turned left
+            const headPitchOffset = head.pitch - 0.4; // 0.4 ~ neutral pitch
+
+            // Compensation factors (empirically tuned)
+            // Head turn shifts apparent iris position by ~30-40% of the head angle
+            const HEAD_COMP_H = 0.35;
+            const HEAD_COMP_V = 0.25;
+
+            h -= headYawOffset * HEAD_COMP_H;
+            v -= headPitchOffset * HEAD_COMP_V;
+
+            return { h, v };
         }
 
         function computeHeadPose(landmarks) {
@@ -794,6 +830,7 @@
                 statusBanner.textContent = '✅ Detecting — red dot follows your eyes';
                 statusBanner.className = 'status-banner status-looking';
                 calBtn.disabled = false;
+                quickCalBtn.disabled = false;
                 isRunning = true;
 
             } catch (err) {
@@ -808,7 +845,10 @@
         });
 
         calBtn.addEventListener('click', () => {
-            if (isRunning) startCalibration();
+            if (isRunning) startCalibration(false);
+        });
+        quickCalBtn.addEventListener('click', () => {
+            if (isRunning) startCalibration(true);
         });
 
         window.onerror = function(msg, url, line) { log('JS Error: ' + msg + ' L' + line, true); };
