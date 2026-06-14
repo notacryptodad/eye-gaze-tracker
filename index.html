@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Eye Gaze Controller</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #fff;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            overflow: hidden;
+            position: relative;
+        }
+        .header { padding: 12px; text-align: center; width: 100%; }
+        .header h1 { font-size: 1.1rem; font-weight: 600; color: #e0e0e0; }
+        .status-banner {
+            width: 90%; max-width: 400px; padding: 12px 20px;
+            border-radius: 12px; text-align: center;
+            font-size: 1.1rem; font-weight: 700; margin: 8px auto;
+            transition: all 0.3s ease;
+        }
+        .status-looking {
+            background: linear-gradient(135deg, #00b894, #00cec9);
+            box-shadow: 0 4px 20px rgba(0, 206, 201, 0.4);
+        }
+        .status-away {
+            background: linear-gradient(135deg, #e17055, #d63031);
+            box-shadow: 0 4px 20px rgba(214, 48, 49, 0.4);
+        }
+        .status-no-face {
+            background: linear-gradient(135deg, #636e72, #2d3436);
+            box-shadow: 0 4px 20px rgba(45, 52, 54, 0.4);
+        }
+
+        /* Gaze dot overlay - full screen */
+        #gazeDot {
+            position: fixed;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: radial-gradient(circle, #ff0000 0%, #ff4444 50%, rgba(255,0,0,0.3) 100%);
+            box-shadow: 0 0 12px rgba(255, 0, 0, 0.8), 0 0 24px rgba(255, 0, 0, 0.4);
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 9999;
+            pointer-events: none;
+            transition: left 0.08s linear, top 0.08s linear;
+            display: none;
+        }
+        #gazeDot.active { display: block; }
+        #gazeDot::after {
+            content: '';
+            position: absolute;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #fff;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        /* Calibration overlay */
+        #calibrationOverlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.85);
+            z-index: 10000;
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        #calibrationOverlay.active { display: flex; }
+        .cal-target {
+            width: 30px; height: 30px;
+            border-radius: 50%;
+            background: #ff4444;
+            border: 3px solid #fff;
+            position: absolute;
+            transform: translate(-50%, -50%);
+            animation: pulse 1s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { transform: translate(-50%, -50%) scale(1); }
+            50% { transform: translate(-50%, -50%) scale(1.3); }
+        }
+        .cal-instruction {
+            position: absolute;
+            bottom: 80px;
+            text-align: center;
+            font-size: 1rem;
+            color: #fff;
+            padding: 0 20px;
+        }
+        .cal-progress {
+            position: absolute;
+            top: 40px;
+            font-size: 0.9rem;
+            color: #aaa;
+        }
+
+        .video-container {
+            position: relative; width: 70%; max-width: 280px;
+            margin: 8px auto; border-radius: 12px; overflow: hidden; background: #000;
+        }
+        video { width: 100%; display: block; transform: scaleX(-1); }
+        canvas {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            transform: scaleX(-1);
+        }
+        .metrics {
+            width: 90%; max-width: 400px; margin: 8px auto;
+            display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px;
+        }
+        .metric-card {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 10px; padding: 8px; text-align: center;
+        }
+        .metric-card .label {
+            font-size: 0.6rem; color: #aaa; text-transform: uppercase; letter-spacing: 1px;
+        }
+        .metric-card .value { font-size: 0.95rem; font-weight: 700; margin-top: 2px; }
+        .controls { margin: 12px auto; text-align: center; display: flex; gap: 8px; }
+        .btn {
+            padding: 10px 24px; border: none; border-radius: 10px;
+            font-size: 0.9rem; font-weight: 600; cursor: pointer;
+            color: #fff;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #6c5ce7, #a29bfe);
+            box-shadow: 0 4px 15px rgba(108, 92, 231, 0.4);
+        }
+        .btn-cal {
+            background: linear-gradient(135deg, #e17055, #d63031);
+            box-shadow: 0 4px 15px rgba(225, 112, 85, 0.4);
+        }
+        .btn:active { transform: scale(0.95); }
+        .btn:disabled { opacity: 0.5; pointer-events: none; }
+        .log {
+            width: 90%; max-width: 400px; margin: 6px auto;
+            font-size: 0.7rem; color: #aaa; text-align: left;
+            max-height: 80px; overflow-y: auto;
+            background: rgba(0,0,0,0.3); border-radius: 8px; padding: 6px;
+        }
+        .log .err { color: #e74c3c; }
+        .coords {
+            position: fixed; bottom: 8px; right: 8px;
+            font-size: 0.65rem; color: rgba(255,255,255,0.4);
+            z-index: 9998;
+        }
+    </style>
+</head>
+<body>
+    <div id="gazeDot"></div>
+    <div id="calibrationOverlay">
+        <div class="cal-target" id="calTarget"></div>
+        <div class="cal-progress" id="calProgress">Point 1 / 5</div>
+        <div class="cal-instruction" id="calInstruction">Look at the red dot and tap anywhere</div>
+    </div>
+
+    <div class="header"><h1>👁️ Eye Gaze Controller</h1></div>
+    <div class="status-banner status-no-face" id="statusBanner">Tap Start to begin</div>
+
+    <div class="video-container">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
+    </div>
+
+    <div class="metrics">
+        <div class="metric-card"><div class="label">X</div><div class="value" id="gazeH">--</div></div>
+        <div class="metric-card"><div class="label">Y</div><div class="value" id="gazeV">--</div></div>
+        <div class="metric-card"><div class="label">FPS</div><div class="value" id="fps">--</div></div>
+    </div>
+
+    <div class="controls">
+        <button class="btn btn-primary" id="startBtn">Start Camera</button>
+        <button class="btn btn-cal" id="calBtn" disabled>Calibrate</button>
+    </div>
+
+    <div class="log" id="log"></div>
+    <div class="coords" id="coords">--</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+
+    <script>
+        const video = document.getElementById('video');
+        const overlay = document.getElementById('overlay');
+        const ctx = overlay.getContext('2d');
+        const statusBanner = document.getElementById('statusBanner');
+        const startBtn = document.getElementById('startBtn');
+        const calBtn = document.getElementById('calBtn');
+        const logEl = document.getElementById('log');
+        const gazeDot = document.getElementById('gazeDot');
+        const calibrationOverlay = document.getElementById('calibrationOverlay');
+        const calTarget = document.getElementById('calTarget');
+        const calProgress = document.getElementById('calProgress');
+        const calInstruction = document.getElementById('calInstruction');
+        const coordsEl = document.getElementById('coords');
+
+        function log(msg, isErr) {
+            const div = document.createElement('div');
+            if (isErr) div.className = 'err';
+            div.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+            logEl.prepend(div);
+        }
+
+        // Landmark indices
+        const LEFT_IRIS_CENTER = 468, RIGHT_IRIS_CENTER = 473;
+        const LEFT_EYE_OUTER = 33, LEFT_EYE_INNER = 133;
+        const RIGHT_EYE_OUTER = 362, RIGHT_EYE_INNER = 263;
+        const LEFT_EYE_TOP = 159, LEFT_EYE_BOTTOM = 145;
+        const RIGHT_EYE_TOP = 386, RIGHT_EYE_BOTTOM = 374;
+        const NOSE_TIP = 1, FOREHEAD = 10, CHIN = 152;
+        const LEFT_CHEEK = 234, RIGHT_CHEEK = 454;
+
+        let frameCount = 0, lastFpsTime = Date.now();
+        const SMOOTH_FRAMES = 8;
+        let gazeHistory = [];
+        let isRunning = false;
+        let currentGaze = { h: 0.5, v: 0.5 };
+
+        // ====== CALIBRATION ======
+        // Maps raw gaze (0-1 iris ratio) → screen coordinates
+        // We collect samples at known screen positions and build a linear mapping
+        let calibration = {
+            done: false,
+            // Default mapping (no calibration)
+            hMin: 0.35, hMax: 0.65,  // raw gaze range maps to screen 0-1
+            vMin: 0.30, vMax: 0.70,
+            // Calibration data
+            points: [],
+            samples: []
+        };
+
+        const CAL_POINTS = [
+            { x: 0.5, y: 0.5 },   // center
+            { x: 0.15, y: 0.15 },  // top-left
+            { x: 0.85, y: 0.15 },  // top-right
+            { x: 0.15, y: 0.85 },  // bottom-left
+            { x: 0.85, y: 0.85 },  // bottom-right
+        ];
+        let calIndex = 0;
+        let calSamples = [];
+        let calCollecting = false;
+        let calCollectTimer = null;
+
+        function startCalibration() {
+            calibration.points = [];
+            calibration.samples = [];
+            calIndex = 0;
+            calibrationOverlay.classList.add('active');
+            showCalPoint();
+            log('Calibration started — look at each dot and tap');
+        }
+
+        function showCalPoint() {
+            const pt = CAL_POINTS[calIndex];
+            calTarget.style.left = (pt.x * 100) + '%';
+            calTarget.style.top = (pt.y * 100) + '%';
+            calProgress.textContent = `Point ${calIndex + 1} / ${CAL_POINTS.length}`;
+            calInstruction.textContent = 'Look at the red dot, then tap anywhere';
+            calSamples = [];
+            calCollecting = false;
+        }
+
+        calibrationOverlay.addEventListener('click', () => {
+            if (calCollecting) return;
+            calCollecting = true;
+            calInstruction.textContent = 'Hold still... collecting samples';
+            calSamples = [];
+
+            // Collect gaze samples for 1 second
+            calCollectTimer = setTimeout(() => {
+                if (calSamples.length < 3) {
+                    calInstruction.textContent = 'Not enough data — look at dot and tap again';
+                    calCollecting = false;
+                    return;
+                }
+
+                // Average the samples
+                const avgH = calSamples.reduce((s, g) => s + g.h, 0) / calSamples.length;
+                const avgV = calSamples.reduce((s, g) => s + g.v, 0) / calSamples.length;
+
+                calibration.points.push(CAL_POINTS[calIndex]);
+                calibration.samples.push({ h: avgH, v: avgV });
+
+                log(`Cal point ${calIndex + 1}: screen(${CAL_POINTS[calIndex].x}, ${CAL_POINTS[calIndex].y}) → gaze(${avgH.toFixed(3)}, ${avgV.toFixed(3)})`);
+
+                calIndex++;
+                if (calIndex >= CAL_POINTS.length) {
+                    finishCalibration();
+                } else {
+                    showCalPoint();
+                }
+            }, 1000);
+        });
+
+        function finishCalibration() {
+            calibrationOverlay.classList.remove('active');
+
+            // Compute linear mapping from gaze to screen
+            // Find min/max of raw gaze that correspond to screen edges
+            const hValues = calibration.samples.map(s => s.h);
+            const vValues = calibration.samples.map(s => s.v);
+            const screenX = calibration.points.map(p => p.x);
+            const screenY = calibration.points.map(p => p.y);
+
+            // Simple linear regression: screen = (gaze - min) / (max - min)
+            // We use the leftmost/rightmost calibration points
+            const leftPts = calibration.samples.filter((_, i) => calibration.points[i].x < 0.3);
+            const rightPts = calibration.samples.filter((_, i) => calibration.points[i].x > 0.7);
+            const topPts = calibration.samples.filter((_, i) => calibration.points[i].y < 0.3);
+            const bottomPts = calibration.samples.filter((_, i) => calibration.points[i].y > 0.7);
+
+            if (leftPts.length && rightPts.length) {
+                calibration.hMin = leftPts.reduce((s, p) => s + p.h, 0) / leftPts.length;
+                calibration.hMax = rightPts.reduce((s, p) => s + p.h, 0) / rightPts.length;
+            }
+            if (topPts.length && bottomPts.length) {
+                calibration.vMin = topPts.reduce((s, p) => s + p.v, 0) / topPts.length;
+                calibration.vMax = bottomPts.reduce((s, p) => s + p.v, 0) / bottomPts.length;
+            }
+
+            calibration.done = true;
+            log(`Calibration done! H:[${calibration.hMin.toFixed(3)}, ${calibration.hMax.toFixed(3)}] V:[${calibration.vMin.toFixed(3)}, ${calibration.vMax.toFixed(3)}]`);
+        }
+
+        function gazeToScreen(gaze) {
+            // Map raw gaze ratio to screen position (0-1)
+            let sx = (gaze.h - calibration.hMin) / (calibration.hMax - calibration.hMin);
+            let sy = (gaze.v - calibration.vMin) / (calibration.vMax - calibration.vMin);
+            // Clamp
+            sx = Math.max(0, Math.min(1, sx));
+            sy = Math.max(0, Math.min(1, sy));
+            return { x: sx, y: sy };
+        }
+
+        // ====== GAZE COMPUTATION ======
+        function computeGaze(landmarks) {
+            const lOuter = landmarks[LEFT_EYE_OUTER];
+            const lInner = landmarks[LEFT_EYE_INNER];
+            const lIris = landmarks[LEFT_IRIS_CENTER];
+            const lW = Math.abs(lInner.x - lOuter.x);
+            const lH = Math.abs(landmarks[LEFT_EYE_TOP].y - landmarks[LEFT_EYE_BOTTOM].y);
+            const lHR = (lIris.x - lOuter.x) / lW;
+            const lVR = (lIris.y - landmarks[LEFT_EYE_TOP].y) / lH;
+
+            const rOuter = landmarks[RIGHT_EYE_OUTER];
+            const rInner = landmarks[RIGHT_EYE_INNER];
+            const rIris = landmarks[RIGHT_IRIS_CENTER];
+            const rW = Math.abs(rInner.x - rOuter.x);
+            const rH = Math.abs(landmarks[RIGHT_EYE_TOP].y - landmarks[RIGHT_EYE_BOTTOM].y);
+            const rHR = (rIris.x - rOuter.x) / rW;
+            const rVR = (rIris.y - landmarks[RIGHT_EYE_TOP].y) / rH;
+
+            return { h: (lHR + rHR) / 2, v: (lVR + rVR) / 2 };
+        }
+
+        function computeHeadPose(landmarks) {
+            const nose = landmarks[NOSE_TIP];
+            const lCheek = landmarks[LEFT_CHEEK];
+            const rCheek = landmarks[RIGHT_CHEEK];
+            const forehead = landmarks[FOREHEAD];
+            const chin = landmarks[CHIN];
+            const fW = rCheek.x - lCheek.x;
+            const fH = chin.y - forehead.y;
+            return { yaw: (nose.x - lCheek.x) / fW, pitch: (nose.y - forehead.y) / fH };
+        }
+
+        function smooth(gaze) {
+            gazeHistory.push(gaze);
+            if (gazeHistory.length > SMOOTH_FRAMES) gazeHistory.shift();
+            const avg = { h: 0, v: 0 };
+            for (const g of gazeHistory) { avg.h += g.h; avg.v += g.v; }
+            avg.h /= gazeHistory.length;
+            avg.v /= gazeHistory.length;
+            return avg;
+        }
+
+        function getStatus(gaze, head) {
+            if (Math.abs(head.yaw - 0.5) > 0.15) return 'away';
+            if (head.pitch < 0.25 || head.pitch > 0.55) return 'away';
+            if (Math.abs(gaze.h - 0.5) > 0.18) return 'away';
+            if (Math.abs(gaze.v - 0.5) > 0.25) return 'away';
+            return 'looking';
+        }
+
+        function updateUI(status, gaze) {
+            statusBanner.className = 'status-banner';
+            if (status === 'looking') {
+                statusBanner.classList.add('status-looking');
+                statusBanner.textContent = '✅ Looking at Screen';
+            } else if (status === 'away') {
+                statusBanner.classList.add('status-away');
+                statusBanner.textContent = '❌ Looking Away';
+            } else {
+                statusBanner.classList.add('status-no-face');
+                statusBanner.textContent = '😶 No Face Detected';
+                gazeDot.classList.remove('active');
+                return;
+            }
+
+            if (gaze) {
+                currentGaze = gaze;
+
+                // Feed calibration samples if collecting
+                if (calCollecting) {
+                    calSamples.push({ h: gaze.h, v: gaze.v });
+                }
+
+                // Map gaze to screen position
+                const screen = gazeToScreen(gaze);
+                const screenX = screen.x * window.innerWidth;
+                const screenY = screen.y * window.innerHeight;
+
+                // Move red dot
+                gazeDot.classList.add('active');
+                gazeDot.style.left = screenX + 'px';
+                gazeDot.style.top = screenY + 'px';
+
+                // Update metrics
+                document.getElementById('gazeH').textContent = Math.round(screenX);
+                document.getElementById('gazeV').textContent = Math.round(screenY);
+                coordsEl.textContent = `(${Math.round(screenX)}, ${Math.round(screenY)}) raw:(${gaze.h.toFixed(2)}, ${gaze.v.toFixed(2)})`;
+
+                frameCount++;
+                const now = Date.now();
+                if (now - lastFpsTime > 1000) {
+                    document.getElementById('fps').textContent = frameCount;
+                    frameCount = 0;
+                    lastFpsTime = now;
+                }
+            }
+        }
+
+        function drawEyes(landmarks, w, h) {
+            ctx.clearRect(0, 0, w, h);
+            ctx.strokeStyle = '#6c5ce7';
+            ctx.lineWidth = 2;
+            const lI = landmarks[LEFT_IRIS_CENTER];
+            const rI = landmarks[RIGHT_IRIS_CENTER];
+            ctx.beginPath(); ctx.arc(lI.x * w, lI.y * h, 8, 0, Math.PI * 2); ctx.stroke();
+            ctx.beginPath(); ctx.arc(rI.x * w, rI.y * h, 8, 0, Math.PI * 2); ctx.stroke();
+        }
+
+        function onResults(results) {
+            if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
+                updateUI('no-face', null);
+                gazeHistory = [];
+                return;
+            }
+            const lm = results.multiFaceLandmarks[0];
+            const rawGaze = computeGaze(lm);
+            const gaze = smooth(rawGaze);
+            const head = computeHeadPose(lm);
+            const status = getStatus(gaze, head);
+            drawEyes(lm, overlay.width, overlay.height);
+            updateUI(status, gaze);
+        }
+
+        // ====== START ======
+        startBtn.addEventListener('click', async function(e) {
+            e.preventDefault();
+            startBtn.disabled = true;
+            startBtn.style.pointerEvents = 'none';
+            startBtn.style.opacity = '0.5';
+            startBtn.textContent = 'Loading...';
+            statusBanner.textContent = '⏳ Initializing...';
+            statusBanner.className = 'status-banner status-no-face';
+            log('Starting...');
+
+            try {
+                if (typeof window.FaceMesh === 'undefined' && typeof FaceMesh === 'undefined') {
+                    throw new Error('MediaPipe FaceMesh not loaded. Check network.');
+                }
+                const FM = window.FaceMesh || FaceMesh;
+                const Cam = window.Camera || Camera;
+
+                log('Creating FaceMesh...');
+                statusBanner.textContent = '⏳ Loading AI model...';
+                const faceMesh = new FM({
+                    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+                });
+
+                faceMesh.setOptions({
+                    maxNumFaces: 1,
+                    refineLandmarks: true,
+                    minDetectionConfidence: 0.5,
+                    minTrackingConfidence: 0.5
+                });
+                faceMesh.onResults(onResults);
+
+                log('Requesting camera...');
+                statusBanner.textContent = '📷 Requesting camera access...';
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+                    audio: false
+                });
+
+                video.srcObject = stream;
+                await new Promise(r => { video.onloadedmetadata = r; });
+                await video.play();
+                log('Camera ready: ' + video.videoWidth + 'x' + video.videoHeight);
+                statusBanner.textContent = '🔄 Camera ready, loading model...';
+
+                overlay.width = video.videoWidth;
+                overlay.height = video.videoHeight;
+
+                log('Processing first frame...');
+                statusBanner.textContent = '🧠 Processing first frame...';
+
+                const camera = new Cam(video, {
+                    onFrame: async () => { await faceMesh.send({ image: video }); },
+                    width: video.videoWidth,
+                    height: video.videoHeight
+                });
+
+                await camera.start();
+                log('Running! Red dot follows your gaze. Use Calibrate for better accuracy.');
+                startBtn.textContent = 'Running ✓';
+                statusBanner.textContent = '✅ Detecting — red dot follows your eyes';
+                statusBanner.className = 'status-banner status-looking';
+                calBtn.disabled = false;
+                isRunning = true;
+
+            } catch (err) {
+                log('ERROR: ' + err.message, true);
+                startBtn.disabled = false;
+                startBtn.style.pointerEvents = '';
+                startBtn.style.opacity = '1';
+                startBtn.textContent = 'Retry';
+                statusBanner.textContent = '⚠️ ' + err.message;
+                statusBanner.className = 'status-banner status-away';
+            }
+        });
+
+        calBtn.addEventListener('click', () => {
+            if (isRunning) startCalibration();
+        });
+
+        window.onerror = function(msg, url, line) { log('JS Error: ' + msg + ' L' + line, true); };
+        window.onunhandledrejection = function(e) { log('Rejected: ' + e.reason, true); };
+        log('Page loaded. Tap Start Camera.');
+    </script>
+</body>
+</html>
