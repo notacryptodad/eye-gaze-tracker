@@ -205,7 +205,7 @@
         <div class="metric-card"><div class="label">Y</div><div class="value" id="gazeV">--</div></div>
         <div class="metric-card"><div class="label">FPS</div><div class="value" id="fps">--</div></div>
         <div class="metric-card"><div class="label">Distance</div><div class="value" id="distance">--</div></div>
-        <div class="metric-card"><div class="label">Eye Gap</div><div class="value" id="eyeGap">--</div></div>
+        <div class="metric-card"><div class="label">Iris px</div><div class="value" id="eyeGap">--</div></div>
         <div class="metric-card"><div class="label">Face %</div><div class="value" id="faceRatio">--</div></div>
     </div>
 
@@ -264,17 +264,25 @@
         let isRunning = false;
         let currentGaze = { h: 0.5, v: 0.5 };
 
-        // ====== DISTANCE ESTIMATION ======
-        // Average inter-pupillary distance (IPD) for adults: ~63mm
-        // We use the ratio of eye distance in frame vs known IPD to estimate distance
-        // Focal length is calibrated per-device; we use a reasonable default
-        const AVG_IPD_MM = 63; // average adult inter-pupillary distance in mm
-        const AVG_FACE_WIDTH_MM = 140; // average face width (cheek to cheek) in mm
-        let focalLengthPx = 0; // calibrated from first detection or manual
-        let distanceCalibrated = false;
-        const KNOWN_DISTANCE_CM = 40; // assume ~40cm at startup for auto-calibration
+        // ====== DISTANCE ESTIMATION (Google MediaPipe Iris Method) ======
+        // Key insight: Human iris horizontal diameter is biologically constant
+        // at 11.7 ± 0.5 mm across the entire population.
+        // Using pinhole camera model: distance = (focalLength * realSize) / pixelSize
+        //
+        // Iris landmarks (with refineLandmarks=true):
+        //   Left iris:  468(center), 469(right), 470(top), 471(left), 472(bottom)
+        //   Right iris: 473(center), 474(right), 475(top), 476(left), 477(bottom)
+        //
+        // Normalized focal length for typical mobile front cameras: ~1.4-1.8
+        // (26-28mm equivalent focal length)
+        const IRIS_REAL_DIAMETER_MM = 11.7; // constant across population
+        const NORMALIZED_FOCAL = 1.5; // good default for mobile front cameras
+        const LEFT_IRIS_RIGHT = 469;
+        const LEFT_IRIS_LEFT = 471;
+        const RIGHT_IRIS_RIGHT2 = 474;
+        const RIGHT_IRIS_LEFT2 = 476;
         let distanceHistory = [];
-        const DIST_SMOOTH = 10;
+        const DIST_SMOOTH = 8;
 
         // ====== CALIBRATION ======
         // Maps raw gaze (0-1 iris ratio) → screen coordinates
@@ -424,52 +432,55 @@
             return { yaw: (nose.x - lCheek.x) / fW, pitch: (nose.y - forehead.y) / fH };
         }
 
-        function computeDistance(landmarks, frameWidth) {
-            // Method 1: Inter-pupillary distance (most reliable)
-            const leftIris = landmarks[LEFT_IRIS_CENTER];
-            const rightIris = landmarks[RIGHT_IRIS_CENTER];
-            const eyeDistPx = Math.sqrt(
-                Math.pow((rightIris.x - leftIris.x) * frameWidth, 2) +
-                Math.pow((rightIris.y - leftIris.y) * frameWidth, 2)
+        function computeDistance(landmarks, frameWidth, frameHeight) {
+            // Google MediaPipe Iris method:
+            // Use iris horizontal diameter as biological size reference (11.7mm)
+            // then apply pinhole camera model to get distance
+
+            // Left iris horizontal span: landmark 469 (right edge) to 471 (left edge)
+            const lR = landmarks[LEFT_IRIS_RIGHT];
+            const lL = landmarks[LEFT_IRIS_LEFT];
+            const leftIrisDiamPx = Math.sqrt(
+                Math.pow((lR.x - lL.x) * frameWidth, 2) +
+                Math.pow((lR.y - lL.y) * frameHeight, 2)
             );
 
-            // Method 2: Face width (cheek to cheek)
-            const lCheek = landmarks[LEFT_CHEEK];
-            const rCheek = landmarks[RIGHT_CHEEK];
-            const faceWidthPx = Math.sqrt(
-                Math.pow((rCheek.x - lCheek.x) * frameWidth, 2) +
-                Math.pow((rCheek.y - lCheek.y) * frameWidth, 2)
+            // Right iris horizontal span: landmark 474 (right edge) to 476 (left edge)
+            const rR = landmarks[RIGHT_IRIS_RIGHT2];
+            const rL = landmarks[RIGHT_IRIS_LEFT2];
+            const rightIrisDiamPx = Math.sqrt(
+                Math.pow((rR.x - rL.x) * frameWidth, 2) +
+                Math.pow((rR.y - rL.y) * frameHeight, 2)
             );
 
-            // Auto-calibrate focal length on first good detection
-            if (!distanceCalibrated && eyeDistPx > 20) {
-                // Assume user is ~40cm away at start
-                focalLengthPx = (eyeDistPx * KNOWN_DISTANCE_CM) / AVG_IPD_MM * 10;
-                distanceCalibrated = true;
-                log('Distance auto-calibrated (assuming 40cm start)');
-            }
+            // Average both irises for robustness against head angle
+            const irisDiamPx = (leftIrisDiamPx + rightIrisDiamPx) / 2;
 
-            if (!distanceCalibrated) return null;
+            if (irisDiamPx < 3) return null; // too small / unreliable
 
-            // Distance = (real_size * focal_length) / pixel_size
-            const distFromEyes = (AVG_IPD_MM * focalLengthPx) / (eyeDistPx * 10);
-            const distFromFace = (AVG_FACE_WIDTH_MM * focalLengthPx) / (faceWidthPx * 10);
+            // Pinhole camera model:
+            // distance(mm) = focalLength(px) * realDiameter(mm) / pixelDiameter(px)
+            // focalLength(px) = normalizedFocal * min(frameWidth, frameHeight)
+            const focalLengthPx = NORMALIZED_FOCAL * Math.min(frameWidth, frameHeight);
+            const distanceMm = (focalLengthPx * IRIS_REAL_DIAMETER_MM) / irisDiamPx;
+            const distanceCm = distanceMm / 10;
 
-            // Weighted average (eyes more reliable)
-            const distCm = distFromEyes * 0.7 + distFromFace * 0.3;
-
-            // Smooth
-            distanceHistory.push(distCm);
+            // Temporal smoothing
+            distanceHistory.push(distanceCm);
             if (distanceHistory.length > DIST_SMOOTH) distanceHistory.shift();
             const smoothed = distanceHistory.reduce((a, b) => a + b, 0) / distanceHistory.length;
 
-            // Face ratio (how much of frame is face)
-            const faceRatio = faceWidthPx / frameWidth * 100;
+            // Extra info: face width ratio for context
+            const lCheek = landmarks[LEFT_CHEEK];
+            const rCheek = landmarks[RIGHT_CHEEK];
+            const faceWidthPx = Math.abs(rCheek.x - lCheek.x) * frameWidth;
+            const faceRatio = (faceWidthPx / frameWidth * 100);
 
             return {
                 distanceCm: Math.round(smoothed),
-                eyeGapPx: Math.round(eyeDistPx),
-                faceRatio: faceRatio.toFixed(1)
+                irisPx: irisDiamPx.toFixed(1),
+                faceRatio: faceRatio.toFixed(1),
+                method: 'iris-11.7mm'
             };
         }
 
@@ -477,7 +488,7 @@
             if (!distData) return;
 
             document.getElementById('distance').textContent = distData.distanceCm + 'cm';
-            document.getElementById('eyeGap').textContent = distData.eyeGapPx + 'px';
+            document.getElementById('eyeGap').textContent = distData.irisPx + 'px';
             document.getElementById('faceRatio').textContent = distData.faceRatio + '%';
 
             // Position marker on distance bar (15cm to 80cm range)
@@ -592,8 +603,8 @@
             drawEyes(lm, overlay.width, overlay.height);
             updateUI(status, gaze);
 
-            // Distance estimation
-            const distData = computeDistance(lm, overlay.width);
+            // Distance estimation (MediaPipe Iris method - iris diameter = 11.7mm)
+            const distData = computeDistance(lm, overlay.width, overlay.height);
             updateDistanceUI(distData);
         }
 
