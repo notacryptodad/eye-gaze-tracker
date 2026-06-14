@@ -634,10 +634,22 @@
         }
 
         function getStatus(gaze, head) {
+            // Head pose check (always reliable regardless of calibration)
             if (Math.abs(head.yaw - 0.5) > 0.15) return 'away';
             if (head.pitch < 0.25 || head.pitch > 0.55) return 'away';
-            if (Math.abs(gaze.h - 0.5) > 0.18) return 'away';
-            if (Math.abs(gaze.v - 0.5) > 0.25) return 'away';
+
+            // If calibrated, use the polynomial mapping to detect out-of-screen gaze
+            if (calibration.polyX && calibration.polyY) {
+                const sx = polyPredict(calibration.polyX, gaze.h, gaze.v);
+                const sy = polyPredict(calibration.polyY, gaze.h, gaze.v);
+                // If predicted screen position is well outside bounds, user is looking away
+                if (sx < -0.15 || sx > 1.15 || sy < -0.15 || sy > 1.15) return 'away';
+            } else {
+                // Pre-calibration: use raw gaze thresholds
+                if (Math.abs(gaze.h - 0.5) > 0.18) return 'away';
+                if (Math.abs(gaze.v - 0.5) > 0.25) return 'away';
+            }
+
             return 'looking';
         }
 
