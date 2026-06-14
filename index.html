@@ -290,19 +290,27 @@
         let calibration = {
             done: false,
             // Default mapping (no calibration)
-            hMin: 0.35, hMax: 0.65,  // raw gaze range maps to screen 0-1
+            hMin: 0.35, hMax: 0.65,
             vMin: 0.30, vMax: 0.70,
+            // Polynomial regression coefficients
+            polyX: null, // coefficients for screen X = f(gazeH, gazeV)
+            polyY: null, // coefficients for screen Y = f(gazeH, gazeV)
             // Calibration data
             points: [],
             samples: []
         };
 
+        // 9-point calibration grid (3x3)
         const CAL_POINTS = [
-            { x: 0.5, y: 0.5 },   // center
-            { x: 0.15, y: 0.15 },  // top-left
-            { x: 0.85, y: 0.15 },  // top-right
-            { x: 0.15, y: 0.85 },  // bottom-left
-            { x: 0.85, y: 0.85 },  // bottom-right
+            { x: 0.5,  y: 0.5 },   // 1. center (first for comfort)
+            { x: 0.1,  y: 0.1 },   // 2. top-left
+            { x: 0.5,  y: 0.1 },   // 3. top-center
+            { x: 0.9,  y: 0.1 },   // 4. top-right
+            { x: 0.1,  y: 0.5 },   // 5. middle-left
+            { x: 0.9,  y: 0.5 },   // 6. middle-right
+            { x: 0.1,  y: 0.9 },   // 7. bottom-left
+            { x: 0.5,  y: 0.9 },   // 8. bottom-center
+            { x: 0.9,  y: 0.9 },   // 9. bottom-right
         ];
         let calIndex = 0;
         let calSamples = [];
@@ -312,10 +320,12 @@
         function startCalibration() {
             calibration.points = [];
             calibration.samples = [];
+            calibration.polyX = null;
+            calibration.polyY = null;
             calIndex = 0;
             calibrationOverlay.classList.add('active');
             showCalPoint();
-            log('Calibration started — look at each dot and tap');
+            log('9-point calibration started — look at each dot and tap');
         }
 
         function showCalPoint() {
@@ -363,38 +373,139 @@
         function finishCalibration() {
             calibrationOverlay.classList.remove('active');
 
-            // Compute linear mapping from gaze to screen
-            // Find min/max of raw gaze that correspond to screen edges
-            const hValues = calibration.samples.map(s => s.h);
-            const vValues = calibration.samples.map(s => s.v);
-            const screenX = calibration.points.map(p => p.x);
-            const screenY = calibration.points.map(p => p.y);
+            // Fit polynomial regression: 2nd order
+            // screenX = a0 + a1*h + a2*v + a3*h^2 + a4*v^2 + a5*h*v
+            // screenY = b0 + b1*h + b2*v + b3*h^2 + b4*v^2 + b5*h*v
+            // Using least squares fit
 
-            // Simple linear regression: screen = (gaze - min) / (max - min)
-            // We use the leftmost/rightmost calibration points
-            const leftPts = calibration.samples.filter((_, i) => calibration.points[i].x < 0.3);
-            const rightPts = calibration.samples.filter((_, i) => calibration.points[i].x > 0.7);
-            const topPts = calibration.samples.filter((_, i) => calibration.points[i].y < 0.3);
-            const bottomPts = calibration.samples.filter((_, i) => calibration.points[i].y > 0.7);
+            const n = calibration.samples.length;
+            if (n < 6) {
+                // Fallback to linear if not enough points
+                const leftPts = calibration.samples.filter((_, i) => calibration.points[i].x < 0.3);
+                const rightPts = calibration.samples.filter((_, i) => calibration.points[i].x > 0.7);
+                const topPts = calibration.samples.filter((_, i) => calibration.points[i].y < 0.3);
+                const bottomPts = calibration.samples.filter((_, i) => calibration.points[i].y > 0.7);
+                if (leftPts.length && rightPts.length) {
+                    calibration.hMin = leftPts.reduce((s, p) => s + p.h, 0) / leftPts.length;
+                    calibration.hMax = rightPts.reduce((s, p) => s + p.h, 0) / rightPts.length;
+                }
+                if (topPts.length && bottomPts.length) {
+                    calibration.vMin = topPts.reduce((s, p) => s + p.v, 0) / topPts.length;
+                    calibration.vMax = bottomPts.reduce((s, p) => s + p.v, 0) / bottomPts.length;
+                }
+                calibration.done = true;
+                log('Calibration done (linear fallback — need 6+ points for polynomial)');
+                return;
+            }
 
-            if (leftPts.length && rightPts.length) {
-                calibration.hMin = leftPts.reduce((s, p) => s + p.h, 0) / leftPts.length;
-                calibration.hMax = rightPts.reduce((s, p) => s + p.h, 0) / rightPts.length;
-            }
-            if (topPts.length && bottomPts.length) {
-                calibration.vMin = topPts.reduce((s, p) => s + p.v, 0) / topPts.length;
-                calibration.vMax = bottomPts.reduce((s, p) => s + p.v, 0) / bottomPts.length;
-            }
+            // Build feature matrix A for polynomial: [1, h, v, h², v², h*v]
+            // Solve for X and Y coefficients separately using least squares
+            calibration.polyX = fitPolynomial(
+                calibration.samples.map(s => [s.h, s.v]),
+                calibration.points.map(p => p.x)
+            );
+            calibration.polyY = fitPolynomial(
+                calibration.samples.map(s => [s.h, s.v]),
+                calibration.points.map(p => p.y)
+            );
 
             calibration.done = true;
-            log(`Calibration done! H:[${calibration.hMin.toFixed(3)}, ${calibration.hMax.toFixed(3)}] V:[${calibration.vMin.toFixed(3)}, ${calibration.vMax.toFixed(3)}]`);
+            log(`9-point polynomial calibration done! ${n} points fitted.`);
+            log(`PolyX: [${calibration.polyX.map(c => c.toFixed(4)).join(', ')}]`);
+            log(`PolyY: [${calibration.polyY.map(c => c.toFixed(4)).join(', ')}]`);
+        }
+
+        // ====== POLYNOMIAL REGRESSION (Least Squares) ======
+        // Fits: y = a0 + a1*x1 + a2*x2 + a3*x1² + a4*x2² + a5*x1*x2
+        function fitPolynomial(inputs, targets) {
+            // Build design matrix with 2nd-order polynomial features
+            const n = inputs.length;
+            const A = [];
+            for (let i = 0; i < n; i++) {
+                const h = inputs[i][0], v = inputs[i][1];
+                A.push([1, h, v, h * h, v * v, h * v]);
+            }
+            // Solve A * coeffs = targets using normal equations: coeffs = (A^T A)^-1 A^T targets
+            const numFeatures = 6;
+            const ATA = Array(numFeatures).fill(null).map(() => Array(numFeatures).fill(0));
+            const ATb = Array(numFeatures).fill(0);
+
+            for (let i = 0; i < n; i++) {
+                for (let j = 0; j < numFeatures; j++) {
+                    ATb[j] += A[i][j] * targets[i];
+                    for (let k = 0; k < numFeatures; k++) {
+                        ATA[j][k] += A[i][j] * A[i][k];
+                    }
+                }
+            }
+
+            // Add small ridge regularization for stability
+            const ridge = 0.001;
+            for (let i = 0; i < numFeatures; i++) {
+                ATA[i][i] += ridge;
+            }
+
+            // Solve using Gaussian elimination
+            return solveLinearSystem(ATA, ATb);
+        }
+
+        function solveLinearSystem(A, b) {
+            // Gaussian elimination with partial pivoting
+            const n = A.length;
+            // Augment matrix
+            const aug = A.map((row, i) => [...row, b[i]]);
+
+            for (let col = 0; col < n; col++) {
+                // Partial pivoting
+                let maxRow = col;
+                for (let row = col + 1; row < n; row++) {
+                    if (Math.abs(aug[row][col]) > Math.abs(aug[maxRow][col])) maxRow = row;
+                }
+                [aug[col], aug[maxRow]] = [aug[maxRow], aug[col]];
+
+                if (Math.abs(aug[col][col]) < 1e-10) continue; // singular
+
+                // Eliminate below
+                for (let row = col + 1; row < n; row++) {
+                    const factor = aug[row][col] / aug[col][col];
+                    for (let j = col; j <= n; j++) {
+                        aug[row][j] -= factor * aug[col][j];
+                    }
+                }
+            }
+
+            // Back substitution
+            const x = Array(n).fill(0);
+            for (let i = n - 1; i >= 0; i--) {
+                x[i] = aug[i][n];
+                for (let j = i + 1; j < n; j++) {
+                    x[i] -= aug[i][j] * x[j];
+                }
+                x[i] /= aug[i][i];
+            }
+            return x;
+        }
+
+        function polyPredict(coeffs, h, v) {
+            // Evaluate: a0 + a1*h + a2*v + a3*h² + a4*v² + a5*h*v
+            return coeffs[0] + coeffs[1]*h + coeffs[2]*v + coeffs[3]*h*h + coeffs[4]*v*v + coeffs[5]*h*v;
         }
 
         function gazeToScreen(gaze) {
-            // Map raw gaze ratio to screen position (0-1)
+            if (calibration.polyX && calibration.polyY) {
+                // Use polynomial regression (much more accurate)
+                let sx = polyPredict(calibration.polyX, gaze.h, gaze.v);
+                let sy = polyPredict(calibration.polyY, gaze.h, gaze.v);
+                // Clamp with small overshoot allowed (for edge smoothness)
+                sx = Math.max(-0.05, Math.min(1.05, sx));
+                sy = Math.max(-0.05, Math.min(1.05, sy));
+                sx = Math.max(0, Math.min(1, sx));
+                sy = Math.max(0, Math.min(1, sy));
+                return { x: sx, y: sy };
+            }
+            // Fallback: linear mapping
             let sx = (gaze.h - calibration.hMin) / (calibration.hMax - calibration.hMin);
             let sy = (gaze.v - calibration.vMin) / (calibration.vMax - calibration.vMin);
-            // Clamp
             sx = Math.max(0, Math.min(1, sx));
             sy = Math.max(0, Math.min(1, sy));
             return { x: sx, y: sy };
